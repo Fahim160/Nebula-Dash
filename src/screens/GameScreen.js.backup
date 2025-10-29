@@ -1,0 +1,982 @@
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  Dimensions,
+  TouchableOpacity,
+  Animated,
+} from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+
+const { width, height } = Dimensions.get('window');
+
+const GRAVITY = 0.6;
+const JUMP_STRENGTH = -12;
+const SHIP_SIZE = 50;
+const OBSTACLE_WIDTH = 60;
+const OBSTACLE_GAP = 200;
+const GAME_SPEED = 3;
+const STAR_SIZE = 30;
+
+// Available ships
+const SHIP_TYPES = {
+  ROCKET: { emoji: '�', name: 'Rocket', speed: 1.0 },
+  UFO: { emoji: '🛸', name: 'UFO', speed: 1.2 },
+  SHUTTLE: { emoji: '🚁', name: 'Shuttle', speed: 0.9 },
+  SATELLITE: { emoji: '🛰️', name: 'Satellite', speed: 1.1 },
+};
+
+export default function GameScreen({ onGameOver, selectedShip = 'ROCKET' }) {
+  const [score, setScore] = useState(0);
+  const [gameOver, setGameOver] = useState(false);
+  const [shipY, setShipY] = useState(height / 2);
+  const [velocity, setVelocity] = useState(0);
+  const [obstacles, setObstacles] = useState([]);
+  const [stars, setStars] = useState([]);
+  const [particles, setParticles] = useState([]);
+  const [coins, setCoins] = useState([]);
+  
+  // New features
+  const [nearMissCount, setNearMissCount] = useState(0);
+  const [perfectRun, setPerfectRun] = useState(0);
+  const [magnetActive, setMagnetActive] = useState(false);
+  const [trailColor, setTrailColor] = useState('#3a86ff');
+
+  const gameLoopRef = useRef(null);
+  const shipRotation = useRef(new Animated.Value(0)).current;
+  const explosionAnim = useRef(new Animated.Value(0)).current;
+  const nearMissAnim = useRef(new Animated.Value(1)).current;
+
+  // Shield pulse animation
+  useEffect(() => {
+    if (hasShield) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(shieldPulse, {
+            toValue: 1.2,
+            duration: 500,
+            useNativeDriver: true,
+          }),
+          Animated.timing(shieldPulse, {
+            toValue: 1,
+            duration: 500,
+            useNativeDriver: true,
+          }),
+        ])
+      ).start();
+    }
+  }, [hasShield]);
+
+  // Initialize obstacles, stars, and power-ups
+  useEffect(() => {
+    const initialObstacles = [];
+    const initialStars = [];
+    const initialPowerups = [];
+
+    for (let i = 0; i < 3; i++) {
+      initialObstacles.push({
+        id: Date.now() + i,
+        x: width + i * 300,
+        height: Math.random() * (height - OBSTACLE_GAP - 100) + 50,
+      });
+    }
+
+    for (let i = 0; i < 5; i++) {
+      initialStars.push({
+        id: Date.now() + i + 1000,
+        x: width + i * 200 + 100,
+        y: Math.random() * (height - 100) + 50,
+        collected: false,
+      });
+    }
+
+    // Add initial power-ups
+    for (let i = 0; i < 2; i++) {
+      const types = Object.keys(POWERUP_TYPES);
+      initialPowerups.push({
+        id: Date.now() + i + 2000,
+        x: width + i * 400 + 200,
+        y: Math.random() * (height - 150) + 75,
+        type: types[Math.floor(Math.random() * types.length)],
+        collected: false,
+      });
+    }
+
+    setObstacles(initialObstacles);
+    setStars(initialStars);
+    setPowerups(initialPowerups);
+  }, []);
+  
+  // Level progression
+  useEffect(() => {
+    const newLevel = Math.floor(distance / 500) + 1;
+    if (newLevel > level) {
+      setLevel(newLevel);
+      // Show level up effect
+      Animated.sequence([
+        Animated.timing(comboScale, {
+          toValue: 1.5,
+          duration: 200,
+          useNativeDriver: true,
+        }),
+        Animated.timing(comboScale, {
+          toValue: 1,
+          duration: 200,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+  }, [distance]);
+
+  // Game loop
+  useEffect(() => {
+    if (gameOver || paused) return;
+
+    const currentSpeed = speedBoost ? BASE_GAME_SPEED * 1.5 : BASE_GAME_SPEED + (level - 1) * 0.3;
+
+    gameLoopRef.current = setInterval(() => {
+      setDistance(prev => prev + currentSpeed);
+      // Update ship position
+      setShipY((prevY) => {
+        const newVelocity = velocity + GRAVITY;
+        setVelocity(newVelocity);
+        const newY = prevY + newVelocity;
+
+        // Check boundaries
+        if (newY < 0 || newY > height - SHIP_SIZE) {
+          handleGameEnd();
+          return prevY;
+        }
+
+        return newY;
+      });
+
+      // Update obstacles
+      setObstacles((prevObstacles) => {
+        const updated = prevObstacles.map((obs) => ({
+          ...obs,
+          x: obs.x - currentSpeed,
+        }));
+
+        // Add new obstacle if needed
+        const lastObstacle = updated[updated.length - 1];
+        if (lastObstacle && lastObstacle.x < width - 300) {
+          updated.push({
+            id: Date.now(),
+            x: width,
+            height: Math.random() * (height - OBSTACLE_GAP - 100) + 50,
+          });
+        }
+
+        // Remove off-screen obstacles
+        return updated.filter((obs) => obs.x > -OBSTACLE_WIDTH);
+      });
+
+      // Update stars
+      setStars((prevStars) => {
+        const updated = prevStars.map((star) => ({
+          ...star,
+          x: star.x - currentSpeed,
+        }));
+
+        // Add new star if needed
+        const lastStar = updated[updated.length - 1];
+        if (lastStar && lastStar.x < width - 200) {
+          updated.push({
+            id: Date.now() + Math.random(),
+            x: width,
+            y: Math.random() * (height - 100) + 50,
+            collected: false,
+          });
+        }
+
+        // Remove off-screen stars
+        return updated.filter((star) => star.x > -STAR_SIZE);
+      });
+      
+      // Update power-ups
+      setPowerups((prevPowerups) => {
+        const updated = prevPowerups.map((powerup) => ({
+          ...powerup,
+          x: powerup.x - currentSpeed,
+        }));
+
+        // Add new power-up occasionally
+        const lastPowerup = updated[updated.length - 1];
+        if (lastPowerup && lastPowerup.x < width - 600 && Math.random() > 0.7) {
+          const types = Object.keys(POWERUP_TYPES);
+          updated.push({
+            id: Date.now() + Math.random(),
+            x: width,
+            y: Math.random() * (height - 150) + 75,
+            type: types[Math.floor(Math.random() * types.length)],
+            collected: false,
+          });
+        }
+
+        // Remove off-screen power-ups
+        return updated.filter((powerup) => powerup.x > -POWERUP_SIZE);
+      });
+
+      // Check collisions
+      checkCollisions();
+    }, 16); // ~60 FPS
+
+    return () => clearInterval(gameLoopRef.current);
+  }, [velocity, shipY, obstacles, stars, powerups, gameOver, paused, speedBoost, level]);
+
+  const handleJump = () => {
+    if (gameOver || paused) return;
+    setVelocity(JUMP_STRENGTH);
+
+    // Animate ship rotation
+    Animated.sequence([
+      Animated.timing(shipRotation, {
+        toValue: -20,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(shipRotation, {
+        toValue: 0,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+    ]).start();
+
+    // Create thrust particles
+    createParticles(80, shipY + SHIP_SIZE / 2, speedBoost ? '#ffff00' : '#3a86ff');
+  };
+  
+  const togglePause = () => {
+    setPaused(!paused);
+  };
+
+  const createParticles = (x, y, color = '#3a86ff') => {
+    const newParticles = [];
+    for (let i = 0; i < 5; i++) {
+      newParticles.push({
+        id: Date.now() + Math.random(),
+        x,
+        y: y + (Math.random() - 0.5) * 20,
+        opacity: new Animated.Value(1),
+        color,
+      });
+    }
+
+    setParticles((prev) => [...prev, ...newParticles]);
+
+    // Fade out particles
+    newParticles.forEach((particle) => {
+      Animated.timing(particle.opacity, {
+        toValue: 0,
+        duration: 500,
+        useNativeDriver: true,
+      }).start(() => {
+        setParticles((prev) => prev.filter((p) => p.id !== particle.id));
+      });
+    });
+  };
+  
+  const activatePowerup = (type) => {
+    Vibration.vibrate(100);
+    
+    switch(type) {
+      case 'SHIELD':
+        setHasShield(true);
+        setTimeout(() => setHasShield(false), 10000); // 10 seconds
+        break;
+      case 'SPEED':
+        setSpeedBoost(true);
+        setTimeout(() => setSpeedBoost(false), 7000); // 7 seconds
+        break;
+      case 'MULTIPLIER':
+        setScoreMultiplier(2);
+        setTimeout(() => setScoreMultiplier(1), 8000); // 8 seconds
+        break;
+    }
+  };
+  
+  const increaseCombo = () => {
+    setCombo(prev => prev + 1);
+    
+    // Animate combo
+    Animated.sequence([
+      Animated.timing(comboScale, {
+        toValue: 1.3,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(comboScale, {
+        toValue: 1,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+    ]).start();
+    
+    // Reset combo timer
+    if (comboTimer) clearTimeout(comboTimer);
+    const timer = setTimeout(() => {
+      setCombo(0);
+    }, 3000); // 3 seconds to keep combo alive
+    setComboTimer(timer);
+  };
+
+  const checkCollisions = () => {
+    const shipLeft = 80;
+    const shipRight = shipLeft + SHIP_SIZE;
+    const shipTop = shipY;
+    const shipBottom = shipY + SHIP_SIZE;
+
+    // Check obstacle collisions
+    obstacles.forEach((obs) => {
+      const obsLeft = obs.x;
+      const obsRight = obs.x + OBSTACLE_WIDTH;
+
+      if (shipRight > obsLeft && shipLeft < obsRight) {
+        if (shipTop < obs.height || shipBottom > obs.height + OBSTACLE_GAP) {
+          if (hasShield) {
+            // Shield absorbs hit
+            setHasShield(false);
+            Vibration.vibrate(200);
+            createParticles(shipLeft + SHIP_SIZE/2, shipY + SHIP_SIZE/2, '#00ffff');
+          } else {
+            handleGameEnd();
+          }
+        } else if (!passedObstacles.has(obs.id) && obsRight < shipLeft) {
+          // Passed obstacle, increase score
+          passedObstacles.add(obs.id);
+          const points = 1 * scoreMultiplier;
+          setScore((prev) => prev + points);
+          increaseCombo();
+          Vibration.vibrate(50);
+        }
+      }
+    });
+
+    // Check star collisions
+    setStars((prevStars) =>
+      prevStars.map((star) => {
+        if (star.collected) return star;
+
+        const starLeft = star.x;
+        const starRight = star.x + STAR_SIZE;
+        const starTop = star.y;
+        const starBottom = star.y + STAR_SIZE;
+
+        if (
+          shipRight > starLeft &&
+          shipLeft < starRight &&
+          shipBottom > starTop &&
+          shipTop < starBottom
+        ) {
+          const points = 5 * scoreMultiplier;
+          setScore((prev) => prev + points);
+          increaseCombo();
+          createParticles(star.x, star.y, '#ffff00');
+          Vibration.vibrate(100);
+          return { ...star, collected: true };
+        }
+
+        return star;
+      })
+    );
+    
+    // Check power-up collisions
+    setPowerups((prevPowerups) =>
+      prevPowerups.map((powerup) => {
+        if (powerup.collected) return powerup;
+
+        const powerupLeft = powerup.x;
+        const powerupRight = powerup.x + POWERUP_SIZE;
+        const powerupTop = powerup.y;
+        const powerupBottom = powerup.y + POWERUP_SIZE;
+
+        if (
+          shipRight > powerupLeft &&
+          shipLeft < powerupRight &&
+          shipBottom > powerupTop &&
+          shipTop < powerupBottom
+        ) {
+          activatePowerup(powerup.type);
+          createParticles(powerup.x, powerup.y, '#ff00ff');
+          return { ...powerup, collected: true };
+        }
+
+        return powerup;
+      })
+    );
+  };
+
+  const handleGameEnd = () => {
+    setGameOver(true);
+    clearInterval(gameLoopRef.current);
+
+    // Explosion animation
+    Animated.spring(explosionAnim, {
+      toValue: 1,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const handleRestart = () => {
+    onGameOver(score);
+  };
+
+  // Dynamic background colors based on level
+  const getBackgroundColors = () => {
+    switch(level) {
+      case 1: return ['#0a0015', '#1a0a2e', '#16213e'];
+      case 2: return ['#1a0015', '#2a1550', '#3a2570'];
+      case 3: return ['#150a1a', '#301a3a', '#4a2a5a'];
+      default: return ['#2a0a15', '#4a1a2e', '#6a2a3e'];
+    }
+  };
+
+  return (
+    <TouchableOpacity
+      activeOpacity={1}
+      onPress={handleJump}
+      style={styles.container}
+    >
+      <LinearGradient
+        colors={getBackgroundColors()}
+        style={styles.gradient}
+      >
+        {/* HUD - Top Left */}
+        <View style={styles.hudTop}>
+          <View style={styles.scoreContainer}>
+            <Text style={styles.scoreLabel}>SCORE</Text>
+            <Text style={styles.scoreText}>{score}</Text>
+          </View>
+          <View style={styles.levelContainer}>
+            <Text style={styles.levelLabel}>LEVEL {level}</Text>
+            <View style={styles.progressBar}>
+              <View style={[styles.progressFill, { width: `${(distance % 500) / 5}%` }]} />
+            </View>
+          </View>
+        </View>
+        
+        {/* Pause Button */}
+        <TouchableOpacity 
+          style={styles.pauseButton}
+          onPress={togglePause}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.pauseText}>{paused ? '▶️' : '⏸️'}</Text>
+        </TouchableOpacity>
+        
+        {/* Combo Display */}
+        {combo > 1 && (
+          <Animated.View 
+            style={[
+              styles.comboContainer,
+              { transform: [{ scale: comboScale }] }
+            ]}
+          >
+            <Text style={styles.comboText}>COMBO x{combo}!</Text>
+            {scoreMultiplier > 1 && (
+              <Text style={styles.multiplierText}>⭐ {scoreMultiplier}x Points</Text>
+            )}
+          </Animated.View>
+        )}
+        
+        {/* Active Power-ups Display */}
+        <View style={styles.powerupsDisplay}>
+          {hasShield && (
+            <Animated.View style={[styles.activePowerup, { transform: [{ scale: shieldPulse }] }]}>
+              <Text style={styles.powerupIcon}>🛡️</Text>
+            </Animated.View>
+          )}
+          {speedBoost && (
+            <View style={styles.activePowerup}>
+              <Text style={styles.powerupIcon}>⚡</Text>
+            </View>
+          )}
+          {scoreMultiplier > 1 && (
+            <View style={styles.activePowerup}>
+              <Text style={styles.powerupIcon}>✨</Text>
+            </View>
+          )}
+        </View>
+
+        {/* Stars (collectibles) */}
+        {stars.map((star) => {
+          if (star.collected) return null;
+          return (
+            <View
+              key={star.id}
+              style={[
+                styles.star,
+                { left: star.x, top: star.y },
+              ]}
+            >
+              <Text style={styles.starEmoji}>⭐</Text>
+            </View>
+          );
+        })}
+        
+        {/* Power-ups */}
+        {powerups.map((powerup) => {
+          if (powerup.collected) return null;
+          return (
+            <View
+              key={powerup.id}
+              style={[
+                styles.powerup,
+                { left: powerup.x, top: powerup.y },
+              ]}
+            >
+              <LinearGradient
+                colors={['rgba(255,255,255,0.3)', 'rgba(255,255,255,0.1)']}
+                style={styles.powerupGlow}
+              >
+                <Text style={styles.powerupEmoji}>{POWERUP_TYPES[powerup.type]}</Text>
+              </LinearGradient>
+            </View>
+          );
+        })}
+
+        {/* Obstacles */}
+        {obstacles.map((obs) => (
+          <View key={obs.id}>
+            {/* Top obstacle */}
+            <LinearGradient
+              colors={['#ff006e', '#d00060']}
+              style={[
+                styles.obstacle,
+                {
+                  left: obs.x,
+                  top: 0,
+                  height: obs.height,
+                },
+              ]}
+            />
+            {/* Bottom obstacle */}
+            <LinearGradient
+              colors={['#ff006e', '#d00060']}
+              style={[
+                styles.obstacle,
+                {
+                  left: obs.x,
+                  top: obs.height + OBSTACLE_GAP,
+                  height: height - obs.height - OBSTACLE_GAP,
+                },
+              ]}
+            />
+          </View>
+        ))}
+
+        {/* Particles */}
+        {particles.map((particle) => (
+          <Animated.View
+            key={particle.id}
+            style={[
+              styles.particle,
+              {
+                left: particle.x,
+                top: particle.y,
+                opacity: particle.opacity,
+                backgroundColor: particle.color || '#3a86ff',
+              },
+            ]}
+          />
+        ))}
+
+        {/* Ship with Shield */}
+        <Animated.View
+          style={[
+            styles.ship,
+            {
+              top: shipY,
+              transform: [
+                {
+                  rotate: shipRotation.interpolate({
+                    inputRange: [-20, 0],
+                    outputRange: ['-20deg', '0deg'],
+                  }),
+                },
+                gameOver && { scale: explosionAnim },
+              ],
+            },
+          ]}
+        >
+          {hasShield && (
+            <Animated.View 
+              style={[
+                styles.shield,
+                { transform: [{ scale: shieldPulse }] }
+              ]}
+            >
+              <LinearGradient
+                colors={['rgba(0,255,255,0.4)', 'rgba(0,255,255,0.1)']}
+                style={styles.shieldGradient}
+              />
+            </Animated.View>
+          )}
+          <Text style={styles.shipEmoji}>🚀</Text>
+          {speedBoost && (
+            <View style={styles.speedTrail}>
+              <Text style={styles.trailText}>💨</Text>
+            </View>
+          )}
+        </Animated.View>
+        
+        {/* Pause Overlay */}
+        {paused && !gameOver && (
+          <View style={styles.pauseOverlay}>
+            <LinearGradient
+              colors={['rgba(0,0,0,0.7)', 'rgba(26,10,46,0.8)']}
+              style={styles.pauseContent}
+            >
+              <Text style={styles.pauseTitle}>⏸️ PAUSED</Text>
+              <TouchableOpacity
+                style={styles.resumeButton}
+                onPress={togglePause}
+              >
+                <Text style={styles.resumeText}>RESUME</Text>
+              </TouchableOpacity>
+              <Text style={styles.pauseStats}>Score: {score}</Text>
+              <Text style={styles.pauseStats}>Level: {level}</Text>
+            </LinearGradient>
+          </View>
+        )}
+
+        {/* Game Over Screen */}
+        {gameOver && (
+          <View style={styles.gameOverContainer}>
+            <LinearGradient
+              colors={['rgba(0,0,0,0.8)', 'rgba(26,10,46,0.9)']}
+              style={styles.gameOverContent}
+            >
+              <Text style={styles.gameOverText}>MISSION FAILED</Text>
+              <Text style={styles.finalScore}>Final Score: {score}</Text>
+              <Text style={styles.levelReached}>Level Reached: {level}</Text>
+              <Text style={styles.distanceTraveled}>
+                Distance: {Math.floor(distance)}m
+              </Text>
+              {combo > 5 && (
+                <Text style={styles.bestCombo}>Best Combo: {combo}x</Text>
+              )}
+              <TouchableOpacity
+                style={styles.restartButton}
+                onPress={handleRestart}
+              >
+                <LinearGradient
+                  colors={['#ff006e', '#8338ec', '#3a86ff']}
+                  style={styles.restartGradient}
+                >
+                  <Text style={styles.restartText}>RETURN TO BASE</Text>
+                </LinearGradient>
+              </TouchableOpacity>
+            </LinearGradient>
+          </View>
+        )}
+      </LinearGradient>
+    </TouchableOpacity>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  gradient: {
+    flex: 1,
+  },
+  hudTop: {
+    position: 'absolute',
+    top: 50,
+    left: 20,
+    right: 20,
+    zIndex: 1000,
+  },
+  scoreContainer: {
+    backgroundColor: 'rgba(131, 56, 236, 0.3)',
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+    borderRadius: 15,
+    borderWidth: 2,
+    borderColor: '#8338ec',
+    marginBottom: 10,
+  },
+  scoreLabel: {
+    fontSize: 12,
+    color: '#a78bfa',
+    fontWeight: '600',
+  },
+  scoreText: {
+    fontSize: 28,
+    fontWeight: 'bold',
+    color: '#fff',
+    textShadowColor: '#ff006e',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10,
+  },
+  levelContainer: {
+    backgroundColor: 'rgba(255, 0, 110, 0.3)',
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+    borderRadius: 15,
+    borderWidth: 2,
+    borderColor: '#ff006e',
+  },
+  levelLabel: {
+    fontSize: 14,
+    color: '#fff',
+    fontWeight: 'bold',
+    marginBottom: 5,
+  },
+  progressBar: {
+    height: 6,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#00ff88',
+    borderRadius: 3,
+  },
+  pauseButton: {
+    position: 'absolute',
+    top: 50,
+    right: 20,
+    backgroundColor: 'rgba(131, 56, 236, 0.4)',
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#8338ec',
+    zIndex: 1001,
+  },
+  pauseText: {
+    fontSize: 24,
+  },
+  comboContainer: {
+    position: 'absolute',
+    top: 200,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(255, 215, 0, 0.3)',
+    paddingHorizontal: 25,
+    paddingVertical: 12,
+    borderRadius: 20,
+    borderWidth: 3,
+    borderColor: '#ffd700',
+    zIndex: 999,
+  },
+  comboText: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#ffd700',
+    textShadowColor: '#ff6600',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10,
+    textAlign: 'center',
+  },
+  multiplierText: {
+    fontSize: 14,
+    color: '#fff',
+    textAlign: 'center',
+    marginTop: 5,
+  },
+  powerupsDisplay: {
+    position: 'absolute',
+    top: 150,
+    right: 20,
+    flexDirection: 'column',
+    zIndex: 999,
+  },
+  activePowerup: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 10,
+    borderWidth: 2,
+    borderColor: '#fff',
+  },
+  powerupIcon: {
+    fontSize: 28,
+  },
+  ship: {
+    position: 'absolute',
+    left: 80,
+    width: SHIP_SIZE,
+    height: SHIP_SIZE,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 100,
+  },
+  shipEmoji: {
+    fontSize: 40,
+    zIndex: 101,
+  },
+  shield: {
+    position: 'absolute',
+    width: SHIP_SIZE + 20,
+    height: SHIP_SIZE + 20,
+    borderRadius: (SHIP_SIZE + 20) / 2,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  shieldGradient: {
+    width: '100%',
+    height: '100%',
+    borderRadius: (SHIP_SIZE + 20) / 2,
+    borderWidth: 3,
+    borderColor: '#00ffff',
+  },
+  speedTrail: {
+    position: 'absolute',
+    right: 45,
+  },
+  trailText: {
+    fontSize: 30,
+    opacity: 0.7,
+  },
+  obstacle: {
+    position: 'absolute',
+    width: OBSTACLE_WIDTH,
+    borderRadius: 10,
+  },
+  star: {
+    position: 'absolute',
+    width: STAR_SIZE,
+    height: STAR_SIZE,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  starEmoji: {
+    fontSize: 30,
+  },
+  powerup: {
+    position: 'absolute',
+    width: POWERUP_SIZE,
+    height: POWERUP_SIZE,
+  },
+  powerupGlow: {
+    width: '100%',
+    height: '100%',
+    borderRadius: POWERUP_SIZE / 2,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.5)',
+  },
+  powerupEmoji: {
+    fontSize: 32,
+  },
+  particle: {
+    position: 'absolute',
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  pauseOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 2000,
+  },
+  pauseContent: {
+    padding: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#8338ec',
+    minWidth: 250,
+  },
+  pauseTitle: {
+    fontSize: 36,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 30,
+  },
+  resumeButton: {
+    backgroundColor: '#8338ec',
+    paddingHorizontal: 40,
+    paddingVertical: 15,
+    borderRadius: 25,
+    marginBottom: 20,
+  },
+  resumeText: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#fff',
+    letterSpacing: 1,
+  },
+  pauseStats: {
+    fontSize: 16,
+    color: '#a78bfa',
+    marginVertical: 5,
+  },
+  gameOverContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  gameOverContent: {
+    padding: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#8338ec',
+  },
+  gameOverText: {
+    fontSize: 40,
+    fontWeight: 'bold',
+    color: '#ff006e',
+    marginBottom: 20,
+    textShadowColor: '#fff',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10,
+  },
+  finalScore: {
+    fontSize: 28,
+    color: '#fff',
+    marginBottom: 10,
+  },
+  levelReached: {
+    fontSize: 20,
+    color: '#a78bfa',
+    marginBottom: 10,
+  },
+  distanceTraveled: {
+    fontSize: 18,
+    color: '#6b7280',
+    marginBottom: 10,
+  },
+  bestCombo: {
+    fontSize: 22,
+    color: '#ffd700',
+    marginBottom: 20,
+    fontWeight: 'bold',
+  },
+  restartButton: {
+    borderRadius: 25,
+    overflow: 'hidden',
+  },
+  restartGradient: {
+    paddingHorizontal: 40,
+    paddingVertical: 15,
+  },
+  restartText: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#fff',
+    letterSpacing: 1,
+  },
+});
