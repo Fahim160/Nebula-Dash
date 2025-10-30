@@ -11,32 +11,39 @@ import { LinearGradient } from "expo-linear-gradient";
 
 const { width, height } = Dimensions.get("window");
 
-const GRAVITY = 0.6;
-const JUMP_STRENGTH = -12;
+const GRAVITY = 0.4;
+const JUMP_STRENGTH = -7;
+const MAX_FALL_SPEED = 8; // Maximum falling velocity
+const MAX_RISE_SPEED = -8; // Maximum rising velocity
 const SHIP_SIZE = 50;
 const OBSTACLE_WIDTH = 60;
 const OBSTACLE_GAP = 200;
-const GAME_SPEED = 3;
+const GAME_SPEED = 2.5;
 const STAR_SIZE = 30;
 const COIN_SIZE = 35;
+const FRAME_RATE = 1000 / 60; // 60 FPS
 
 export default function GameScreen({ onGameOver }) {
   const [score, setScore] = useState(0);
   const [coins, setCoins] = useState(0);
   const [gameOver, setGameOver] = useState(false);
-  const [shipY, setShipY] = useState(height / 2);
-  const [velocity, setVelocity] = useState(0);
-  const [obstacles, setObstacles] = useState([]);
-  const [stars, setStars] = useState([]);
-  const [goldCoins, setGoldCoins] = useState([]);
-  const [particles, setParticles] = useState([]);
+  const [renderTrigger, setRenderTrigger] = useState(0);
 
   // New unique features
   const [nearMisses, setNearMisses] = useState(0);
   const [perfectStreak, setPerfectStreak] = useState(0);
   const [backgroundTheme, setBackgroundTheme] = useState(0);
 
+  // Use refs for game state to avoid excessive re-renders
+  const shipYRef = useRef(height / 2);
+  const velocityRef = useRef(0);
+  const obstaclesRef = useRef([]);
+  const starsRef = useRef([]);
+  const goldCoinsRef = useRef([]);
+  const particlesRef = useRef([]);
+
   const gameLoopRef = useRef(null);
+  const animationFrameRef = useRef(null);
   const shipRotation = useRef(new Animated.Value(0)).current;
   const explosionAnim = useRef(new Animated.Value(0)).current;
   const nearMissFlash = useRef(new Animated.Value(0)).current;
@@ -83,9 +90,10 @@ export default function GameScreen({ onGameOver }) {
       });
     }
 
-    setObstacles(initialObstacles);
-    setStars(initialStars);
-    setGoldCoins(initialCoins);
+    obstaclesRef.current = initialObstacles;
+    starsRef.current = initialStars;
+    goldCoinsRef.current = initialCoins;
+    setRenderTrigger((prev) => prev + 1);
   }, []);
 
   // Change background theme based on score
@@ -97,109 +105,136 @@ export default function GameScreen({ onGameOver }) {
     setBackgroundTheme(themeIndex);
   }, [score]);
 
-  // Game loop
+  // Game loop with requestAnimationFrame for better performance
   useEffect(() => {
     if (gameOver) return;
 
-    gameLoopRef.current = setInterval(() => {
-      // Update ship position
-      setShipY((prevY) => {
-        const newVelocity = velocity + GRAVITY;
-        setVelocity(newVelocity);
-        const newY = prevY + newVelocity;
+    let lastTime = Date.now();
+    let frameCount = 0;
 
-        // Check boundaries
-        if (newY < 0 || newY > height - SHIP_SIZE) {
-          handleGameEnd();
-          return prevY;
+    const gameLoop = () => {
+      const currentTime = Date.now();
+      const deltaTime = currentTime - lastTime;
+
+      // Run at 60 FPS
+      if (deltaTime >= FRAME_RATE) {
+        lastTime = currentTime - (deltaTime % FRAME_RATE);
+
+        // Update ship position with velocity limits
+        velocityRef.current += GRAVITY;
+
+        // Clamp velocity to prevent uncontrollable falling/rising
+        if (velocityRef.current > MAX_FALL_SPEED) {
+          velocityRef.current = MAX_FALL_SPEED;
+        }
+        if (velocityRef.current < MAX_RISE_SPEED) {
+          velocityRef.current = MAX_RISE_SPEED;
         }
 
-        return newY;
-      });
+        shipYRef.current += velocityRef.current;
 
-      // Update obstacles
-      setObstacles((prevObstacles) => {
-        const updated = prevObstacles.map((obs) => ({
+        // Check boundaries
+        if (shipYRef.current < 0 || shipYRef.current > height - SHIP_SIZE) {
+          handleGameEnd();
+          return;
+        }
+
+        // Update obstacles
+        obstaclesRef.current = obstaclesRef.current.map((obs) => ({
           ...obs,
           x: obs.x - GAME_SPEED,
         }));
 
-        const lastObstacle = updated[updated.length - 1];
+        const lastObstacle =
+          obstaclesRef.current[obstaclesRef.current.length - 1];
         if (lastObstacle && lastObstacle.x < width - 300) {
-          updated.push({
+          obstaclesRef.current.push({
             id: Date.now(),
             x: width,
             height: Math.random() * (height - OBSTACLE_GAP - 100) + 50,
           });
         }
+        obstaclesRef.current = obstaclesRef.current.filter(
+          (obs) => obs.x > -OBSTACLE_WIDTH
+        );
 
-        return updated.filter((obs) => obs.x > -OBSTACLE_WIDTH);
-      });
-
-      // Update stars
-      setStars((prevStars) => {
-        const updated = prevStars.map((star) => ({
+        // Update stars
+        starsRef.current = starsRef.current.map((star) => ({
           ...star,
           x: star.x - GAME_SPEED,
         }));
 
-        const lastStar = updated[updated.length - 1];
+        const lastStar = starsRef.current[starsRef.current.length - 1];
         if (lastStar && lastStar.x < width - 200) {
-          updated.push({
+          starsRef.current.push({
             id: Date.now() + Math.random(),
             x: width,
             y: Math.random() * (height - 100) + 50,
             collected: false,
           });
         }
+        starsRef.current = starsRef.current.filter(
+          (star) => star.x > -STAR_SIZE
+        );
 
-        return updated.filter((star) => star.x > -STAR_SIZE);
-      });
-
-      // Update gold coins
-      setGoldCoins((prevCoins) => {
-        const updated = prevCoins.map((coin) => ({
+        // Update gold coins
+        goldCoinsRef.current = goldCoinsRef.current.map((coin) => ({
           ...coin,
           x: coin.x - GAME_SPEED,
         }));
 
-        const lastCoin = updated[updated.length - 1];
+        const lastCoin = goldCoinsRef.current[goldCoinsRef.current.length - 1];
         if (lastCoin && lastCoin.x < width - 350 && Math.random() > 0.6) {
-          updated.push({
+          goldCoinsRef.current.push({
             id: Date.now() + Math.random(),
             x: width,
             y: Math.random() * (height - 100) + 50,
             collected: false,
           });
         }
+        goldCoinsRef.current = goldCoinsRef.current.filter(
+          (coin) => coin.x > -COIN_SIZE
+        );
 
-        return updated.filter((coin) => coin.x > -COIN_SIZE);
-      });
+        checkCollisions();
 
-      checkCollisions();
-    }, 16);
+        // Trigger re-render every 3 frames for smoother performance
+        frameCount++;
+        if (frameCount % 2 === 0) {
+          setRenderTrigger((prev) => prev + 1);
+        }
+      }
 
-    return () => clearInterval(gameLoopRef.current);
-  }, [velocity, shipY, obstacles, stars, goldCoins, gameOver]);
+      animationFrameRef.current = requestAnimationFrame(gameLoop);
+    };
+
+    animationFrameRef.current = requestAnimationFrame(gameLoop);
+
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, [gameOver]);
 
   const handleJump = () => {
     if (gameOver) return;
-    setVelocity(JUMP_STRENGTH);
+    velocityRef.current = JUMP_STRENGTH;
 
     Animated.sequence([
       Animated.timing(shipRotation, {
         toValue: -20,
-        duration: 100,
+        duration: 150,
         useNativeDriver: true,
       }),
       Animated.timing(shipRotation, {
         toValue: 0,
-        duration: 100,
+        duration: 150,
         useNativeDriver: true,
       }),
     ]).start();
 
-    createParticles(80, shipY + SHIP_SIZE / 2);
+    createParticles(80, shipYRef.current + SHIP_SIZE / 2);
   };
 
   const createParticles = (x, y) => {
@@ -213,7 +248,7 @@ export default function GameScreen({ onGameOver }) {
       });
     }
 
-    setParticles((prev) => [...prev, ...newParticles]);
+    particlesRef.current = [...particlesRef.current, ...newParticles];
 
     newParticles.forEach((particle) => {
       Animated.timing(particle.opacity, {
@@ -221,7 +256,9 @@ export default function GameScreen({ onGameOver }) {
         duration: 500,
         useNativeDriver: true,
       }).start(() => {
-        setParticles((prev) => prev.filter((p) => p.id !== particle.id));
+        particlesRef.current = particlesRef.current.filter(
+          (p) => p.id !== particle.id
+        );
       });
     });
   };
@@ -229,8 +266,8 @@ export default function GameScreen({ onGameOver }) {
   const checkNearMiss = (obsLeft, obsRight, obsHeight) => {
     const shipLeft = 80;
     const shipRight = shipLeft + SHIP_SIZE;
-    const shipTop = shipY;
-    const shipBottom = shipY + SHIP_SIZE;
+    const shipTop = shipYRef.current;
+    const shipBottom = shipYRef.current + SHIP_SIZE;
 
     // Near miss detection - ship is very close to obstacle
     const horizontalNear = shipRight > obsLeft - 20 && shipLeft < obsRight + 20;
@@ -263,11 +300,11 @@ export default function GameScreen({ onGameOver }) {
   const checkCollisions = () => {
     const shipLeft = 80;
     const shipRight = shipLeft + SHIP_SIZE;
-    const shipTop = shipY;
-    const shipBottom = shipY + SHIP_SIZE;
+    const shipTop = shipYRef.current;
+    const shipBottom = shipYRef.current + SHIP_SIZE;
 
     // Check obstacle collisions
-    obstacles.forEach((obs) => {
+    obstaclesRef.current.forEach((obs) => {
       const obsLeft = obs.x;
       const obsRight = obs.x + OBSTACLE_WIDTH;
 
@@ -303,59 +340,57 @@ export default function GameScreen({ onGameOver }) {
     });
 
     // Check star collisions
-    setStars((prevStars) =>
-      prevStars.map((star) => {
-        if (star.collected) return star;
+    starsRef.current = starsRef.current.map((star) => {
+      if (star.collected) return star;
 
-        const starLeft = star.x;
-        const starRight = star.x + STAR_SIZE;
-        const starTop = star.y;
-        const starBottom = star.y + STAR_SIZE;
+      const starLeft = star.x;
+      const starRight = star.x + STAR_SIZE;
+      const starTop = star.y;
+      const starBottom = star.y + STAR_SIZE;
 
-        if (
-          shipRight > starLeft &&
-          shipLeft < starRight &&
-          shipBottom > starTop &&
-          shipTop < starBottom
-        ) {
-          setScore((prev) => prev + 5);
-          createParticles(star.x, star.y);
-          return { ...star, collected: true };
-        }
+      if (
+        shipRight > starLeft &&
+        shipLeft < starRight &&
+        shipBottom > starTop &&
+        shipTop < starBottom
+      ) {
+        setScore((prev) => prev + 5);
+        createParticles(star.x, star.y);
+        return { ...star, collected: true };
+      }
 
-        return star;
-      })
-    );
+      return star;
+    });
 
     // Check coin collisions
-    setGoldCoins((prevCoins) =>
-      prevCoins.map((coin) => {
-        if (coin.collected) return coin;
+    goldCoinsRef.current = goldCoinsRef.current.map((coin) => {
+      if (coin.collected) return coin;
 
-        const coinLeft = coin.x;
-        const coinRight = coin.x + COIN_SIZE;
-        const coinTop = coin.y;
-        const coinBottom = coin.y + COIN_SIZE;
+      const coinLeft = coin.x;
+      const coinRight = coin.x + COIN_SIZE;
+      const coinTop = coin.y;
+      const coinBottom = coin.y + COIN_SIZE;
 
-        if (
-          shipRight > coinLeft &&
-          shipLeft < coinRight &&
-          shipBottom > coinTop &&
-          shipTop < coinBottom
-        ) {
-          setCoins((prev) => prev + 1);
-          createParticles(coin.x, coin.y);
-          return { ...coin, collected: true };
-        }
+      if (
+        shipRight > coinLeft &&
+        shipLeft < coinRight &&
+        shipBottom > coinTop &&
+        shipTop < coinBottom
+      ) {
+        setCoins((prev) => prev + 1);
+        createParticles(coin.x, coin.y);
+        return { ...coin, collected: true };
+      }
 
-        return coin;
-      })
-    );
+      return coin;
+    });
   };
 
   const handleGameEnd = () => {
     setGameOver(true);
-    clearInterval(gameLoopRef.current);
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+    }
 
     Animated.spring(explosionAnim, {
       toValue: 1,
@@ -415,7 +450,7 @@ export default function GameScreen({ onGameOver }) {
         )}
 
         {/* Stars */}
-        {stars.map((star) => {
+        {starsRef.current.map((star) => {
           if (star.collected) return null;
           return (
             <View
@@ -428,7 +463,7 @@ export default function GameScreen({ onGameOver }) {
         })}
 
         {/* Gold Coins */}
-        {goldCoins.map((coin) => {
+        {goldCoinsRef.current.map((coin) => {
           if (coin.collected) return null;
           return (
             <View
@@ -441,7 +476,7 @@ export default function GameScreen({ onGameOver }) {
         })}
 
         {/* Obstacles */}
-        {obstacles.map((obs) => (
+        {obstaclesRef.current.map((obs) => (
           <View key={obs.id}>
             <LinearGradient
               colors={["#ff006e", "#d00060"]}
@@ -469,7 +504,7 @@ export default function GameScreen({ onGameOver }) {
         ))}
 
         {/* Particles */}
-        {particles.map((particle) => (
+        {particlesRef.current.map((particle) => (
           <Animated.View
             key={particle.id}
             style={[
@@ -488,7 +523,7 @@ export default function GameScreen({ onGameOver }) {
           style={[
             styles.ship,
             {
-              top: shipY,
+              top: shipYRef.current,
               transform: [
                 {
                   rotate: shipRotation.interpolate({
@@ -496,7 +531,7 @@ export default function GameScreen({ onGameOver }) {
                     outputRange: ["-20deg", "0deg"],
                   }),
                 },
-                gameOver && { scale: explosionAnim },
+                ...(gameOver ? [{ scale: explosionAnim }] : []),
               ],
             },
           ]}
